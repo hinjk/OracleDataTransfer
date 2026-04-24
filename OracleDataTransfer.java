@@ -10,22 +10,29 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 
 /**
- * Oracle DB Data Transfer Tool  v2
+ * Oracle DB Data Transfer Tool  v3
  * 운영DB → 개발DB 데이터 이관 도구
  *
- * 변경사항:
- *   1) DB 카드에 Schema 입력 필드 추가 → ALL_TABLES 기반 조회
- *   2) 테이블 더블클릭 or [미리보기] 버튼으로
- *      SOURCE / TARGET 데이터를 탭 다이얼로그에서 각각 SELECT 확인
- *      - 표시 건수(최대 5000) 설정
- *      - WHERE 조건 직접 입력
- *      - 컬럼 타입 헤더 표시 + 자동 너비 조정
+ * v3 변경사항 (v2 대비):
+ *   1) CLOB / BLOB 컬럼 대응 (setCharacterStream / setBinaryStream)
+ *   2) 폰트 → 맑은 고딕(Malgun Gothic)
+ *   3) getConnection URL 구분자 ':' → '/'  (port/sid)
+ *   4) TRUNCATE → DELETE FROM  (전체 삭제, 롤백 가능)
+ *   5) FK DISABLE 체크박스 제거
+ *   6) 테이블 필터 → ALL_TABLES LIKE %filter% DB 직접 조회
  *
  * 컴파일: javac -cp .:ojdbc8.jar OracleDataTransfer.java
  * 실행:   java  -cp .:ojdbc8.jar OracleDataTransfer
  * (Windows 는 ':'  →  ';')
  */
 public class OracleDataTransfer extends JFrame {
+
+    // ── 폰트 ─────────────────────────────────────────────────────────────────
+    private static final String FN   = "맑은 고딕";
+    private static final int    F_SM = 11;
+    private static final int    F_MD = 12;
+    private static final int    F_LG = 14;
+    private static final int    F_TL = 17;
 
     // ── 색상 팔레트 ──────────────────────────────────────────────────────────
     private static final Color C_BG       = new Color(0x0F, 0x17, 0x23);
@@ -36,42 +43,40 @@ public class OracleDataTransfer extends JFrame {
     private static final Color C_ACCENT2  = new Color(0x00, 0xFF, 0xB3);
     private static final Color C_ERROR    = new Color(0xFF, 0x45, 0x45);
     private static final Color C_SUCCESS  = new Color(0x39, 0xD3, 0x53);
-    private static final Color C_WARN     = new Color(0xFF, 0x8C, 0x00);
+    private static final Color C_WARN     = new Color(0xFF, 0xA0, 0x00);
     private static final Color C_TEXT     = new Color(0xD0, 0xE8, 0xFF);
     private static final Color C_TEXT_DIM = new Color(0x5A, 0x7A, 0x9A);
     private static final Color C_INPUT_BG = new Color(0x0A, 0x12, 0x1C);
     private static final Color C_FIELD_BD = new Color(0x25, 0x45, 0x60);
 
     // ── Source DB 필드 ────────────────────────────────────────────────────────
-    private JTextField srcIp, srcPort, srcSid, srcUser, srcSchema;
+    private JTextField     srcIp, srcPort, srcSid, srcUser, srcSchema;
     private JPasswordField srcPass;
-    private JButton btnConnSrc;
-    private JLabel  lblConnSrc;
+    private JButton        btnConnSrc;
+    private JLabel         lblConnSrc;
 
     // ── Target DB 필드 ────────────────────────────────────────────────────────
-    private JTextField tgtIp, tgtPort, tgtSid, tgtUser, tgtSchema;
+    private JTextField     tgtIp, tgtPort, tgtSid, tgtUser, tgtSchema;
     private JPasswordField tgtPass;
-    private JButton btnConnTgt;
-    private JLabel  lblConnTgt;
+    private JButton        btnConnTgt;
+    private JLabel         lblConnTgt;
 
     // ── 테이블 선택 ───────────────────────────────────────────────────────────
     private final DefaultListModel<String> tableListModel = new DefaultListModel<>();
-    private final List<String> allTableNames = new ArrayList<>();
-    private JList<String> tableList;
-    private JTextField filterField;
-    private JLabel lblTableCount;
+    private JList<String>  tableList;
+    private JTextField     filterField;
+    private JLabel         lblTableCount;
 
     // ── 옵션 ─────────────────────────────────────────────────────────────────
     private JSpinner  spinBatch;
-    private JCheckBox chkTruncate;
+    private JCheckBox chkDeleteAll;
     private JCheckBox chkCommitEach;
-    private JCheckBox chkDisableConst;
 
     // ── 진행상황 ──────────────────────────────────────────────────────────────
     private DefaultTableModel progressModel;
-    private JTable progressTable;
-    private JProgressBar overallBar;
-    private JLabel lblOverall;
+    private JTable            progressTable;
+    private JProgressBar      overallBar;
+    private JLabel            lblOverall;
 
     // ── 로그 ─────────────────────────────────────────────────────────────────
     private JTextArea logArea;
@@ -80,14 +85,14 @@ public class OracleDataTransfer extends JFrame {
     private JButton btnTransfer, btnStop, btnClear;
 
     // ── 내부 상태 ─────────────────────────────────────────────────────────────
-    private Connection srcConn = null;
-    private Connection tgtConn = null;
+    private Connection       srcConn       = null;
+    private Connection       tgtConn       = null;
     private volatile boolean stopRequested = false;
-    private ExecutorService executor = null;
+    private ExecutorService  executor      = null;
 
     // ─────────────────────────────────────────────────────────────────────────
     public OracleDataTransfer() {
-        super("Oracle Data Transfer  v2  ·  운영DB → 개발DB");
+        super("Oracle Data Transfer  v3  ·  운영DB → 개발DB");
         initUI();
         setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
         addWindowListener(new WindowAdapter() {
@@ -118,12 +123,12 @@ public class OracleDataTransfer extends JFrame {
         p.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, C_BORDER));
         p.setPreferredSize(new Dimension(0, 56));
 
-        JLabel title = new JLabel("  ⬡  ORACLE DATA TRANSFER  v2");
-        title.setFont(new Font("Consolas", Font.BOLD, 17));
+        JLabel title = new JLabel("  ⬡  ORACLE DATA TRANSFER  v3");
+        title.setFont(new Font(FN, Font.BOLD, F_TL));
         title.setForeground(C_ACCENT);
 
-        JLabel sub = new JLabel("Production → Development  |  Schema-aware Batch Copy    ");
-        sub.setFont(new Font("Consolas", Font.PLAIN, 11));
+        JLabel sub = new JLabel("Production → Development  |  CLOB 지원 · Schema 지정 · Batch Copy    ");
+        sub.setFont(new Font(FN, Font.PLAIN, F_SM));
         sub.setForeground(C_TEXT_DIM);
 
         p.add(title, BorderLayout.WEST);
@@ -164,8 +169,8 @@ public class OracleDataTransfer extends JFrame {
         return sp;
     }
 
-    // ── DB 카드 (Schema 필드 추가) ────────────────────────────────────────────
-    private JPanel buildDbCard(String title, boolean isSource) {
+    // ── DB 카드 ───────────────────────────────────────────────────────────────
+    private JPanel buildDbCard(String title, boolean isSrc) {
         JPanel card = new JPanel(new GridBagLayout());
         card.setBackground(C_CARD);
         card.setBorder(createCardBorder(title));
@@ -175,19 +180,18 @@ public class OracleDataTransfer extends JFrame {
         g.insets = new Insets(4, 6, 4, 6);
         g.fill   = GridBagConstraints.HORIZONTAL;
 
-        // 입력 순서: Server IP / Port / SID / Schema / User ID / Password
         String[] labels = {"Server IP", "Port", "SID", "Schema", "User ID", "Password"};
         int row = 0;
 
-        if (isSource) {
+        if (isSrc) {
             srcIp     = makeField("192.168.1.10");
             srcPort   = makeField("1521");
             srcSid    = makeField("ORCL");
-            srcSchema = makeField("SCOTT");          // ← 스키마 (빈 값이면 접속 User 스키마)
+            srcSchema = makeField("SCOTT");
             srcUser   = makeField("scott");
             srcPass   = makePassField();
-            JComponent[] comps = {srcIp, srcPort, srcSid, srcSchema, srcUser, srcPass};
-            for (int i = 0; i < labels.length; i++) addFormRow(card, g, row++, labels[i], comps[i]);
+            JComponent[] cs = {srcIp, srcPort, srcSid, srcSchema, srcUser, srcPass};
+            for (int i = 0; i < labels.length; i++) addFormRow(card, g, row++, labels[i], cs[i]);
 
             g.gridx = 0; g.gridy = row; g.gridwidth = 1; g.weightx = 0;
             lblConnSrc = makeDotLabel(false);
@@ -203,8 +207,8 @@ public class OracleDataTransfer extends JFrame {
             tgtSchema = makeField("SCOTT");
             tgtUser   = makeField("scott");
             tgtPass   = makePassField();
-            JComponent[] comps = {tgtIp, tgtPort, tgtSid, tgtSchema, tgtUser, tgtPass};
-            for (int i = 0; i < labels.length; i++) addFormRow(card, g, row++, labels[i], comps[i]);
+            JComponent[] cs = {tgtIp, tgtPort, tgtSid, tgtSchema, tgtUser, tgtPass};
+            for (int i = 0; i < labels.length; i++) addFormRow(card, g, row++, labels[i], cs[i]);
 
             g.gridx = 0; g.gridy = row; g.gridwidth = 1; g.weightx = 0;
             lblConnTgt = makeDotLabel(false);
@@ -217,24 +221,24 @@ public class OracleDataTransfer extends JFrame {
         return card;
     }
 
-    private void addFormRow(JPanel card, GridBagConstraints g, int row,
-                            String labelText, JComponent field) {
+    private void addFormRow(JPanel card, GridBagConstraints g,
+                            int row, String lbTxt, JComponent field) {
         g.gridx = 0; g.gridy = row; g.gridwidth = 1; g.weightx = 0;
-        JLabel lbl = new JLabel(labelText);
+        JLabel lbl = new JLabel(lbTxt);
         lbl.setForeground(C_TEXT_DIM);
-        lbl.setFont(new Font("Consolas", Font.PLAIN, 11));
+        lbl.setFont(new Font(FN, Font.PLAIN, F_SM));
         lbl.setPreferredSize(new Dimension(68, 24));
         card.add(lbl, g);
         g.gridx = 1; g.gridwidth = 2; g.weightx = 1.0;
         card.add(field, g);
     }
 
-    // ── 옵션 카드 ─────────────────────────────────────────────────────────────
+    // ── 옵션 카드 (FK 체크박스 없음, DELETE ALL) ──────────────────────────────
     private JPanel buildOptionsCard() {
         JPanel card = new JPanel(new GridBagLayout());
         card.setBackground(C_CARD);
         card.setBorder(createCardBorder("TRANSFER OPTIONS"));
-        card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 160));
+        card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 140));
 
         GridBagConstraints g = new GridBagConstraints();
         g.insets = new Insets(5, 8, 5, 8);
@@ -248,17 +252,13 @@ public class OracleDataTransfer extends JFrame {
         card.add(spinBatch, g);
 
         g.gridx = 0; g.gridy = 1; g.gridwidth = 2;
-        chkTruncate = makeCheck("INSERT 전 TARGET 테이블 TRUNCATE");
-        card.add(chkTruncate, g);
+        chkDeleteAll = makeCheck("INSERT 전 TARGET 테이블 DELETE ALL (전체 삭제)");
+        card.add(chkDeleteAll, g);
 
         g.gridy = 2;
-        chkCommitEach = makeCheck("배치 단위로 COMMIT  (기본: 테이블 단위)");
+        chkCommitEach = makeCheck("배치 단위로 COMMIT  (기본: 테이블 단위 COMMIT)");
         chkCommitEach.setSelected(true);
         card.add(chkCommitEach, g);
-
-        g.gridy = 3;
-        chkDisableConst = makeCheck("이관 중 FK 제약조건 DISABLE  (DBA 권한 필요)");
-        card.add(chkDisableConst, g);
 
         return card;
     }
@@ -285,28 +285,25 @@ public class OracleDataTransfer extends JFrame {
     private JPanel buildTablePanel() {
         JPanel card = new JPanel(new BorderLayout(0, 4));
         card.setBackground(C_CARD);
-        card.setBorder(createCardBorder("TABLE SELECTION  ─  더블클릭 or [미리보기] 버튼으로 데이터 확인"));
+        card.setBorder(createCardBorder(
+                "TABLE SELECTION  ─  더블클릭 또는 [미리보기] 버튼으로 데이터 확인"));
 
         // 도구 모음
         JPanel toolbar = new JPanel(new BorderLayout(6, 0));
         toolbar.setBackground(C_CARD);
         toolbar.setBorder(BorderFactory.createEmptyBorder(0, 4, 4, 4));
 
-        filterField = makeField("테이블명 필터...");
-        filterField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
-            public void insertUpdate(javax.swing.event.DocumentEvent e)  { filterTables(); }
-            public void removeUpdate(javax.swing.event.DocumentEvent e)  { filterTables(); }
-            public void changedUpdate(javax.swing.event.DocumentEvent e) { filterTables(); }
-        });
+        filterField = makeField("테이블명 입력 후 [목록 조회]  (LIKE  %입력값%)");
+        filterField.addActionListener(e -> loadTables());   // Enter 키
 
         JButton btnLoad    = makeButton("목록 조회",  C_ACCENT2);
         JButton btnSelAll  = makeButton("전체 선택",  C_TEXT_DIM);
-        JButton btnDesel   = makeButton("해제",       C_TEXT_DIM);
+        JButton btnDesel   = makeButton("선택 해제",  C_TEXT_DIM);
         JButton btnPreview = makeButton("⊞ 미리보기", C_WARN);
 
-        btnLoad.setPreferredSize(new Dimension(90, 28));
-        btnSelAll.setPreferredSize(new Dimension(80, 28));
-        btnDesel.setPreferredSize(new Dimension(50, 28));
+        btnLoad.setPreferredSize(new Dimension(95, 28));
+        btnSelAll.setPreferredSize(new Dimension(85, 28));
+        btnDesel.setPreferredSize(new Dimension(80, 28));
         btnPreview.setPreferredSize(new Dimension(105, 28));
 
         btnLoad.addActionListener(e -> loadTables());
@@ -321,15 +318,14 @@ public class OracleDataTransfer extends JFrame {
         toolbar.add(filterField, BorderLayout.CENTER);
         toolbar.add(btns,        BorderLayout.EAST);
 
-        // 리스트
         tableList = new JList<>(tableListModel);
         tableList.setBackground(C_INPUT_BG);
         tableList.setForeground(C_TEXT);
-        tableList.setFont(new Font("Consolas", Font.PLAIN, 12));
+        tableList.setFont(new Font(FN, Font.PLAIN, F_MD));
         tableList.setSelectionBackground(new Color(0x00, 0x60, 0x90));
         tableList.setSelectionForeground(Color.WHITE);
         tableList.setFixedCellHeight(22);
-        tableList.addMouseListener(new MouseAdapter() {          // 더블클릭 → 미리보기
+        tableList.addMouseListener(new MouseAdapter() {
             public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2) openPreviewDialog();
             }
@@ -340,8 +336,9 @@ public class OracleDataTransfer extends JFrame {
         sp.getViewport().setBackground(C_INPUT_BG);
 
         lblTableCount = new JLabel("  테이블 수: 0");
-        lblTableCount.setFont(new Font("Consolas", Font.PLAIN, 11));
+        lblTableCount.setFont(new Font(FN, Font.PLAIN, F_SM));
         lblTableCount.setForeground(C_TEXT_DIM);
+        lblTableCount.setBorder(BorderFactory.createEmptyBorder(3, 3, 3, 3));
 
         card.add(toolbar,       BorderLayout.NORTH);
         card.add(sp,            BorderLayout.CENTER);
@@ -355,17 +352,22 @@ public class OracleDataTransfer extends JFrame {
         card.setBackground(C_CARD);
         card.setBorder(createCardBorder("PROGRESS"));
 
-        JPanel barPanel = new JPanel(new BorderLayout(8, 0));
-        barPanel.setBackground(C_CARD);
-        barPanel.setBorder(BorderFactory.createEmptyBorder(2, 6, 6, 6));
+        JPanel barRow = new JPanel(new BorderLayout(8, 0));
+        barRow.setBackground(C_CARD);
+        barRow.setBorder(BorderFactory.createEmptyBorder(2, 6, 6, 6));
+
         lblOverall = new JLabel("대기 중");
-        lblOverall.setFont(new Font("Consolas", Font.PLAIN, 11));
+        lblOverall.setFont(new Font(FN, Font.PLAIN, F_SM));
         lblOverall.setForeground(C_TEXT_DIM);
+        lblOverall.setPreferredSize(new Dimension(140, 22));
+
         overallBar = new JProgressBar(0, 100);
         overallBar.setStringPainted(true);
+        overallBar.setPreferredSize(new Dimension(0, 22));
         styleProgressBar(overallBar, C_ACCENT);
-        barPanel.add(lblOverall, BorderLayout.WEST);
-        barPanel.add(overallBar, BorderLayout.CENTER);
+
+        barRow.add(lblOverall, BorderLayout.WEST);
+        barRow.add(overallBar, BorderLayout.CENTER);
 
         String[] cols = {"테이블명", "상태", "총 건수", "이관 건수", "배치"};
         progressModel = new DefaultTableModel(cols, 0) {
@@ -378,8 +380,8 @@ public class OracleDataTransfer extends JFrame {
         sp.setBorder(BorderFactory.createLineBorder(C_FIELD_BD));
         sp.getViewport().setBackground(C_INPUT_BG);
 
-        card.add(barPanel, BorderLayout.NORTH);
-        card.add(sp,       BorderLayout.CENTER);
+        card.add(barRow, BorderLayout.NORTH);
+        card.add(sp,     BorderLayout.CENTER);
         return card;
     }
 
@@ -394,7 +396,7 @@ public class OracleDataTransfer extends JFrame {
         logArea.setEditable(false);
         logArea.setBackground(C_INPUT_BG);
         logArea.setForeground(new Color(0x7F, 0xD6, 0x7F));
-        logArea.setFont(new Font("Consolas", Font.PLAIN, 11));
+        logArea.setFont(new Font(FN, Font.PLAIN, F_SM));
         logArea.setLineWrap(true);
 
         JScrollPane sp = new JScrollPane(logArea);
@@ -410,12 +412,13 @@ public class OracleDataTransfer extends JFrame {
         p.setBackground(C_PANEL);
         p.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, C_BORDER));
 
-        btnClear    = makeButton("로그 지우기",        C_TEXT_DIM);
-        btnStop     = makeButton("⏹  중단",            C_ERROR);
-        btnTransfer = makeButton("▶  데이터 이관 시작", C_ACCENT2);
-        btnTransfer.setFont(new Font("Consolas", Font.BOLD, 13));
+        btnClear    = makeButton("로그 지우기",         C_TEXT_DIM);
+        btnStop     = makeButton("⏹  중단",             C_ERROR);
+        btnTransfer = makeButton("▶  데이터 이관 시작",  C_ACCENT2);
+        btnTransfer.setFont(new Font(FN, Font.BOLD, F_LG));
         btnTransfer.setPreferredSize(new Dimension(190, 36));
         btnStop.setPreferredSize(new Dimension(100, 36));
+        btnClear.setPreferredSize(new Dimension(110, 36));
         btnStop.setEnabled(false);
 
         btnClear.addActionListener(e -> logArea.setText(""));
@@ -430,7 +433,7 @@ public class OracleDataTransfer extends JFrame {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  데이터 미리보기 다이얼로그
+    //  데이터 미리보기 다이얼로그 (SOURCE / TARGET 탭)
     // ═════════════════════════════════════════════════════════════════════════
     private void openPreviewDialog() {
         String tableName = tableList.getSelectedValue();
@@ -441,17 +444,17 @@ public class OracleDataTransfer extends JFrame {
         dlg.setLocationRelativeTo(this);
         dlg.getContentPane().setBackground(C_BG);
 
-        // ── 상단 컨트롤 바 ──────────────────────────────────────────────────
+        // 상단 컨트롤 바
         JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 8));
         top.setBackground(C_PANEL);
         top.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, C_BORDER));
 
         JLabel lblTbl = new JLabel("Table :  " + tableName);
-        lblTbl.setFont(new Font("Consolas", Font.BOLD, 13));
+        lblTbl.setFont(new Font(FN, Font.BOLD, F_LG));
         lblTbl.setForeground(C_ACCENT);
 
         JLabel lblRows = new JLabel("표시 건수 :");
-        lblRows.setFont(new Font("Consolas", Font.PLAIN, 11));
+        lblRows.setFont(new Font(FN, Font.PLAIN, F_SM));
         lblRows.setForeground(C_TEXT_DIM);
 
         JSpinner spinRows = new JSpinner(new SpinnerNumberModel(100, 1, 5000, 50));
@@ -459,19 +462,18 @@ public class OracleDataTransfer extends JFrame {
         spinRows.setPreferredSize(new Dimension(82, 26));
 
         JLabel lblWhere = new JLabel("WHERE :");
-        lblWhere.setFont(new Font("Consolas", Font.PLAIN, 11));
+        lblWhere.setFont(new Font(FN, Font.PLAIN, F_SM));
         lblWhere.setForeground(C_TEXT_DIM);
 
-        JTextField fldWhere = makeField("(선택)  예)  DEPT_ID = 10 AND STATUS = 'Y'");
-        fldWhere.setPreferredSize(new Dimension(340, 26));
+        JTextField fldWhere = makeField("(선택)  예)  DEPT_ID = 10  AND  STATUS = 'Y'");
+        fldWhere.setPreferredSize(new Dimension(360, 26));
 
-        JButton btnSrc     = makeButton("◀  SOURCE 조회", C_ACCENT);
-        JButton btnTgt     = makeButton("▶  TARGET 조회", C_ACCENT2);
-        JButton btnBothBtn = makeButton("◀▶ 양쪽 동시 조회", C_WARN);
-
-        JLabel lblStatus = new JLabel("");
-        lblStatus.setFont(new Font("Consolas", Font.PLAIN, 11));
-        lblStatus.setForeground(C_TEXT_DIM);
+        JButton btnSrc  = makeButton("◀  SOURCE 조회",  C_ACCENT);
+        JButton btnTgt  = makeButton("▶  TARGET 조회",  C_ACCENT2);
+        JButton btnBoth = makeButton("◀▶ 양쪽 동시 조회", C_WARN);
+        JLabel  lblStat = new JLabel("");
+        lblStat.setFont(new Font(FN, Font.PLAIN, F_SM));
+        lblStat.setForeground(C_TEXT_DIM);
 
         top.add(lblTbl);
         top.add(Box.createHorizontalStrut(12));
@@ -479,63 +481,57 @@ public class OracleDataTransfer extends JFrame {
         top.add(Box.createHorizontalStrut(8));
         top.add(lblWhere); top.add(fldWhere);
         top.add(Box.createHorizontalStrut(8));
-        top.add(btnSrc); top.add(btnTgt); top.add(btnBothBtn);
-        top.add(lblStatus);
+        top.add(btnSrc); top.add(btnTgt); top.add(btnBoth);
+        top.add(lblStat);
 
-        // ── SOURCE / TARGET 탭 ──────────────────────────────────────────────
+        // SOURCE / TARGET 탭
         JTabbedPane tabs = new JTabbedPane();
-        tabs.setFont(new Font("Consolas", Font.BOLD, 12));
+        tabs.setFont(new Font(FN, Font.BOLD, F_MD));
         styleTab(tabs);
 
-        // SOURCE 탭
         DefaultTableModel srcModel = new DefaultTableModel() {
             public boolean isCellEditable(int r, int c) { return false; }
         };
-        JTable    srcJTable = buildPreviewTable(srcModel);
-        JLabel    srcCount  = makeCountLabel("SOURCE", C_ACCENT);
-        JPanel    srcTabPanel = wrapPreviewPanel(srcJTable, srcCount);
+        JTable  srcJT    = buildPreviewTable(srcModel);
+        JLabel  srcCount = makeCountLabel("SOURCE", C_ACCENT);
+        JPanel  srcPanel = wrapPreviewPanel(srcJT, srcCount);
 
-        // TARGET 탭
         DefaultTableModel tgtModel = new DefaultTableModel() {
             public boolean isCellEditable(int r, int c) { return false; }
         };
-        JTable    tgtJTable = buildPreviewTable(tgtModel);
-        JLabel    tgtCount  = makeCountLabel("TARGET", C_ACCENT2);
-        JPanel    tgtTabPanel = wrapPreviewPanel(tgtJTable, tgtCount);
+        JTable  tgtJT    = buildPreviewTable(tgtModel);
+        JLabel  tgtCount = makeCountLabel("TARGET", C_ACCENT2);
+        JPanel  tgtPanel = wrapPreviewPanel(tgtJT, tgtCount);
 
-        tabs.addTab(
-            "◀  SOURCE  ( " + getSchema(true)  + "." + tableName + " )", srcTabPanel);
-        tabs.addTab(
-            "▶  TARGET  ( " + getSchema(false) + "." + tableName + " )", tgtTabPanel);
+        tabs.addTab("◀  SOURCE  ( " + getSchema(true)  + "." + tableName + " )", srcPanel);
+        tabs.addTab("▶  TARGET  ( " + getSchema(false) + "." + tableName + " )", tgtPanel);
 
-        // ── 버튼 액션 ──────────────────────────────────────────────────────
+        // 버튼 액션
         Runnable doSrc = () -> {
             if (srcConn == null) { showError("연결 없음", "SOURCE DB를 먼저 연결하세요."); return; }
             tabs.setSelectedIndex(0);
-            lblStatus.setForeground(C_ACCENT);
-            lblStatus.setText("SOURCE 조회 중...");
+            lblStat.setForeground(C_ACCENT);
+            lblStat.setText("SOURCE 조회 중...");
             execPreview(srcConn, getSchema(true), tableName,
                         (int) spinRows.getValue(), fldWhere.getText().trim(),
-                        srcModel, srcJTable, srcCount, lblStatus, "SOURCE");
+                        srcModel, srcJT, srcCount, lblStat, "SOURCE");
         };
         Runnable doTgt = () -> {
             if (tgtConn == null) { showError("연결 없음", "TARGET DB를 먼저 연결하세요."); return; }
             tabs.setSelectedIndex(1);
-            lblStatus.setForeground(C_ACCENT2);
-            lblStatus.setText("TARGET 조회 중...");
+            lblStat.setForeground(C_ACCENT2);
+            lblStat.setText("TARGET 조회 중...");
             execPreview(tgtConn, getSchema(false), tableName,
                         (int) spinRows.getValue(), fldWhere.getText().trim(),
-                        tgtModel, tgtJTable, tgtCount, lblStatus, "TARGET");
+                        tgtModel, tgtJT, tgtCount, lblStat, "TARGET");
         };
 
         btnSrc.addActionListener(e -> doSrc.run());
         btnTgt.addActionListener(e -> doTgt.run());
-        btnBothBtn.addActionListener(e -> { doSrc.run(); doTgt.run(); });
-
-        // Enter 키로도 조회
+        btnBoth.addActionListener(e -> { doSrc.run(); doTgt.run(); });
         fldWhere.addActionListener(e -> { doSrc.run(); doTgt.run(); });
 
-        // ── 닫기 버튼 ──────────────────────────────────────────────────────
+        // 닫기
         JPanel bottom = new JPanel(new FlowLayout(FlowLayout.RIGHT, 12, 8));
         bottom.setBackground(C_PANEL);
         bottom.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, C_BORDER));
@@ -555,7 +551,7 @@ public class OracleDataTransfer extends JFrame {
         JTable t = new JTable(model);
         t.setBackground(C_INPUT_BG);
         t.setForeground(C_TEXT);
-        t.setFont(new Font("Consolas", Font.PLAIN, 11));
+        t.setFont(new Font(FN, Font.PLAIN, F_SM));
         t.setGridColor(C_BORDER);
         t.setRowHeight(20);
         t.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
@@ -563,10 +559,9 @@ public class OracleDataTransfer extends JFrame {
         t.setSelectionForeground(Color.WHITE);
         t.getTableHeader().setBackground(C_CARD);
         t.getTableHeader().setForeground(C_ACCENT);
-        t.getTableHeader().setFont(new Font("Consolas", Font.BOLD, 11));
+        t.getTableHeader().setFont(new Font(FN, Font.BOLD, F_SM));
         t.getTableHeader().setBorder(BorderFactory.createLineBorder(C_BORDER));
 
-        // null 값 표시 + 짝수/홀수 행 색상
         t.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
             public Component getTableCellRendererComponent(JTable tbl, Object val,
                     boolean sel, boolean foc, int r, int c) {
@@ -590,7 +585,7 @@ public class OracleDataTransfer extends JFrame {
 
     private JLabel makeCountLabel(String side, Color accent) {
         JLabel lbl = new JLabel("  " + side + "  —  조회 전");
-        lbl.setFont(new Font("Consolas", Font.PLAIN, 11));
+        lbl.setFont(new Font(FN, Font.PLAIN, F_SM));
         lbl.setForeground(accent);
         lbl.setBorder(BorderFactory.createEmptyBorder(4, 6, 4, 6));
         return lbl;
@@ -612,9 +607,9 @@ public class OracleDataTransfer extends JFrame {
     private void styleTab(JTabbedPane tabs) {
         tabs.setBackground(C_BG);
         tabs.setForeground(C_TEXT);
-        UIManager.put("TabbedPane.selected",          C_CARD);
-        UIManager.put("TabbedPane.background",        C_BG);
-        UIManager.put("TabbedPane.foreground",        C_TEXT);
+        UIManager.put("TabbedPane.selected",             C_CARD);
+        UIManager.put("TabbedPane.background",           C_BG);
+        UIManager.put("TabbedPane.foreground",           C_TEXT);
         UIManager.put("TabbedPane.unselectedBackground", C_PANEL);
     }
 
@@ -630,10 +625,10 @@ public class OracleDataTransfer extends JFrame {
             protected Void doInBackground() {
                 String qualified = (schema == null || schema.isBlank())
                         ? tableName : schema.toUpperCase() + "." + tableName;
-                // FETCH FIRST ... ROWS ONLY  (Oracle 12c+)
                 String sql = "SELECT * FROM " + qualified
-                        + (where.isBlank() ? "" : " WHERE " + where)
+                        + (where == null || where.isBlank() ? "" : " WHERE " + where)
                         + " FETCH FIRST " + maxRows + " ROWS ONLY";
+
                 try (Statement st = conn.createStatement();
                      ResultSet rs = st.executeQuery(sql)) {
 
@@ -648,11 +643,21 @@ public class OracleDataTransfer extends JFrame {
                     Vector<Vector<Object>> data = new Vector<>();
                     while (rs.next()) {
                         Vector<Object> row = new Vector<>();
-                        for (int i = 1; i <= colCnt; i++) row.add(rs.getObject(i));
+                        for (int i = 1; i <= colCnt; i++) {
+                            int type = meta.getColumnType(i);
+                            if (type == Types.CLOB || type == Types.NCLOB) {
+                                Clob clob = rs.getClob(i);
+                                if (clob == null) { row.add(null); continue; }
+                                long len = clob.length();
+                                String s = clob.getSubString(1, (int) Math.min(len, 500));
+                                row.add(len > 500 ? s + " …[" + len + "자]" : s);
+                            } else {
+                                row.add(rs.getObject(i));
+                            }
+                        }
                         data.add(row);
                     }
                     rowCount = data.size();
-
                     SwingUtilities.invokeLater(() -> {
                         model.setDataVector(data, headers);
                         autoResizeColumns(jt, colCnt);
@@ -669,28 +674,28 @@ public class OracleDataTransfer extends JFrame {
                 } else {
                     statusLbl.setForeground(C_SUCCESS);
                     statusLbl.setText(side + " 조회 완료  (" + String.format("%,d", rowCount) + "건)");
-                    countLbl.setText(String.format("  %s  —  %,d 건 표시  (최대 %,d)", side, rowCount, maxRows));
-                    log(String.format("[PREVIEW] %s  %s.%s  %,d건 조회", side, schema, tableName, rowCount));
+                    countLbl.setText(String.format("  %s  —  %,d 건 표시  (최대 %,d)",
+                            side, rowCount, maxRows));
+                    log(String.format("[PREVIEW] %s  %s.%s  %,d건 조회",
+                            side, schema, tableName, rowCount));
                 }
             }
         };
         w.execute();
     }
 
-    // 컬럼 너비 자동 조정
     private void autoResizeColumns(JTable t, int colCnt) {
+        if (t == null) return;
         TableColumnModel cm = t.getColumnModel();
         for (int c = 0; c < colCnt && c < cm.getColumnCount(); c++) {
             TableColumn col = cm.getColumn(c);
             int w = 80;
-            // 헤더 너비
             TableCellRenderer hr = t.getTableHeader().getDefaultRenderer();
             Component hc = hr.getTableCellRendererComponent(
                     t, col.getHeaderValue(), false, false, -1, c);
             w = Math.max(w, hc.getPreferredSize().width + 10);
-            // 최대 50행 기준 데이터 너비
-            int sampleRows = Math.min(50, t.getRowCount());
-            for (int r = 0; r < sampleRows; r++) {
+            int sample = Math.min(50, t.getRowCount());
+            for (int r = 0; r < sample; r++) {
                 TableCellRenderer cr = t.getCellRenderer(r, c);
                 Component cc = t.prepareRenderer(cr, r, c);
                 w = Math.max(w, cc.getPreferredSize().width + 10);
@@ -699,30 +704,28 @@ public class OracleDataTransfer extends JFrame {
         }
     }
 
-    // 스키마 문자열 반환 (빈 값이면 User ID로 대체)
-    private String getSchema(boolean isSource) {
-        String s = (isSource ? srcSchema : tgtSchema).getText().trim();
+    private String getSchema(boolean isSrc) {
+        String s = (isSrc ? srcSchema : tgtSchema).getText().trim();
         return s.isEmpty()
-            ? (isSource ? srcUser : tgtUser).getText().trim().toUpperCase()
+            ? (isSrc ? srcUser : tgtUser).getText().trim().toUpperCase()
             : s.toUpperCase();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  연결 테스트
     // ═════════════════════════════════════════════════════════════════════════
-    private void testConnection(boolean isSource) {
-        JButton btn = isSource ? btnConnSrc : btnConnTgt;
-        JLabel  lbl = isSource ? lblConnSrc : lblConnTgt;
+    private void testConnection(boolean isSrc) {
+        JButton btn = isSrc ? btnConnSrc : btnConnTgt;
+        JLabel  lbl = isSrc ? lblConnSrc : lblConnTgt;
         btn.setEnabled(false);
         btn.setText("연결 중...");
 
-        String ip     = (isSource ? srcIp     : tgtIp    ).getText();
-        String port   = (isSource ? srcPort   : tgtPort  ).getText();
-        String sid    = (isSource ? srcSid    : tgtSid   ).getText();
-        String user   = (isSource ? srcUser   : tgtUser  ).getText();
-        String schema = (isSource ? srcSchema : tgtSchema).getText().trim();
-        char[] passArr = isSource ? srcPass.getPassword() : tgtPass.getPassword();
-        String pass   = new String(passArr);
+        String ip     = (isSrc ? srcIp     : tgtIp    ).getText().trim();
+        String port   = (isSrc ? srcPort   : tgtPort  ).getText().trim();
+        String sid    = (isSrc ? srcSid    : tgtSid   ).getText().trim();
+        String user   = (isSrc ? srcUser   : tgtUser  ).getText().trim();
+        String schema = (isSrc ? srcSchema : tgtSchema).getText().trim();
+        String pass   = new String(isSrc ? srcPass.getPassword() : tgtPass.getPassword());
 
         SwingWorker<Connection, Void> w = new SwingWorker<>() {
             String err;
@@ -736,12 +739,13 @@ public class OracleDataTransfer extends JFrame {
                 try {
                     Connection c = get();
                     if (c != null) {
-                        if (isSource) srcConn = c; else tgtConn = c;
+                        if (isSrc) srcConn = c; else tgtConn = c;
                         setDot(lbl, true);
-                        log((isSource ? "[SOURCE]" : "[TARGET]")
+                        log((isSrc ? "[SOURCE]" : "[TARGET]")
                             + " 연결 성공: " + user + "@" + ip + ":" + port + "/" + sid
                             + (schema.isEmpty() ? "" : "  Schema=" + schema.toUpperCase()));
-                        showInfo("연결 성공", (isSource ? "SOURCE" : "TARGET") + " DB에 연결되었습니다.");
+                        showInfo("연결 성공",
+                                (isSrc ? "SOURCE" : "TARGET") + " DB에 연결되었습니다.");
                     } else {
                         setDot(lbl, false);
                         log("❌ 연결 실패: " + err);
@@ -754,32 +758,45 @@ public class OracleDataTransfer extends JFrame {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  테이블 목록 조회
+    //  테이블 목록 조회  ─  LIKE %filter% DB 직접 조회
     // ═════════════════════════════════════════════════════════════════════════
     private void loadTables() {
         if (srcConn == null) { showError("오류", "SOURCE DB를 먼저 연결하세요."); return; }
+
         String schema = getSchema(true);
+        String raw    = filterField.getText().trim();
+        // 안내 문구는 필터로 쓰지 않음
+        String filter = raw.startsWith("테이블명 입력") ? "" : raw;
+
         tableListModel.clear();
-        allTableNames.clear();
-        log("[TABLE] 스키마 '" + schema + "' 테이블 조회 중...");
+        final String ff = filter;
+        log("[TABLE] 스키마 '" + schema + "'"
+            + (ff.isEmpty() ? "" : "  필터: %" + ff + "%") + "  조회 중...");
 
         SwingWorker<List<String>, Void> w = new SwingWorker<>() {
             protected List<String> doInBackground() throws Exception {
                 List<String> list = new ArrayList<>();
-                // ALL_TABLES 로 지정 스키마 조회
-                String sql = "SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER = ? ORDER BY TABLE_NAME";
+                String like = ff.isEmpty() ? "%" : "%" + ff.toUpperCase() + "%";
+
+                // ALL_TABLES
+                String sql = "SELECT TABLE_NAME FROM ALL_TABLES " +
+                             "WHERE OWNER = ? AND TABLE_NAME LIKE ? ORDER BY TABLE_NAME";
                 try (PreparedStatement ps = srcConn.prepareStatement(sql)) {
                     ps.setString(1, schema);
+                    ps.setString(2, like);
                     try (ResultSet rs = ps.executeQuery()) {
                         while (rs.next()) list.add(rs.getString(1));
                     }
                 }
-                // 권한 부족 or 결과 없을 때 USER_TABLES 폴백
+                // 결과 없으면 USER_TABLES 폴백
                 if (list.isEmpty()) {
-                    try (Statement st = srcConn.createStatement();
-                         ResultSet rs = st.executeQuery(
-                             "SELECT TABLE_NAME FROM USER_TABLES ORDER BY TABLE_NAME")) {
-                        while (rs.next()) list.add(rs.getString(1));
+                    String sql2 = "SELECT TABLE_NAME FROM USER_TABLES " +
+                                  "WHERE TABLE_NAME LIKE ? ORDER BY TABLE_NAME";
+                    try (PreparedStatement ps = srcConn.prepareStatement(sql2)) {
+                        ps.setString(1, like);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            while (rs.next()) list.add(rs.getString(1));
+                        }
                     }
                 }
                 return list;
@@ -787,11 +804,11 @@ public class OracleDataTransfer extends JFrame {
             protected void done() {
                 try {
                     List<String> list = get();
-                    allTableNames.addAll(list);
                     for (String t : list) tableListModel.addElement(t);
-                    lblTableCount.setText(
-                        "  테이블 수: " + list.size() + "  (Schema: " + schema + ")");
-                    log("[TABLE] " + list.size() + "개 테이블 로드  (Schema: " + schema + ")");
+                    lblTableCount.setText("  테이블 수: " + list.size()
+                        + "  (Schema: " + schema + ")"
+                        + (ff.isEmpty() ? "" : "  필터: %" + ff + "%"));
+                    log("[TABLE] " + list.size() + "개 로드  (Schema: " + schema + ")");
                 } catch (Exception ex) {
                     log("❌ 테이블 조회 실패: " + ex.getMessage());
                 }
@@ -800,16 +817,8 @@ public class OracleDataTransfer extends JFrame {
         w.execute();
     }
 
-    private void filterTables() {
-        String kw = filterField.getText().trim().toUpperCase();
-        tableListModel.clear();
-        for (String t : allTableNames) {
-            if (kw.isEmpty() || t.contains(kw)) tableListModel.addElement(t);
-        }
-    }
-
     // ═════════════════════════════════════════════════════════════════════════
-    //  데이터 이관
+    //  데이터 이관  ─  CLOB / BLOB 대응 · DELETE ALL
     // ═════════════════════════════════════════════════════════════════════════
     private void startTransfer() {
         if (srcConn == null || tgtConn == null) {
@@ -840,9 +849,8 @@ public class OracleDataTransfer extends JFrame {
         lblOverall.setText("이관 중...");
 
         int     batchSize  = (int) spinBatch.getValue();
-        boolean truncate   = chkTruncate.isSelected();
+        boolean deleteAll  = chkDeleteAll.isSelected();
         boolean commitEach = chkCommitEach.isSelected();
-        boolean disableFK  = chkDisableConst.isSelected();
 
         executor = Executors.newSingleThreadExecutor();
         executor.submit(() -> {
@@ -853,8 +861,7 @@ public class OracleDataTransfer extends JFrame {
                 final int row = idx;
                 updateProgress(row, "진행 중", "-", "0", "-");
                 try {
-                    transferTable(table, srcSch, tgtSch,
-                                  batchSize, truncate, commitEach, disableFK, row);
+                    transferTable(table, srcSch, tgtSch, batchSize, deleteAll, commitEach, row);
                     updateProgress(row, "✔ 완료", null, null, null);
                 } catch (Exception ex) {
                     updateProgress(row, "❌ 오류", "-", "-", "-");
@@ -876,12 +883,13 @@ public class OracleDataTransfer extends JFrame {
     }
 
     private void transferTable(String table, String srcSch, String tgtSch,
-                               int batchSize, boolean truncate,
-                               boolean commitEach, boolean disableFK, int row) throws Exception {
+                               int batchSize, boolean deleteAll,
+                               boolean commitEach, int row) throws Exception {
         String srcQ = srcSch.isBlank() ? table : srcSch + "." + table;
         String tgtQ = tgtSch.isBlank() ? table : tgtSch + "." + table;
         log("[START] " + srcQ + "  →  " + tgtQ);
 
+        // 총 건수
         long total = 0;
         try (Statement st = srcConn.createStatement();
              ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + srcQ)) {
@@ -897,23 +905,28 @@ public class OracleDataTransfer extends JFrame {
             return;
         }
 
-        List<String> cols = getColumns(srcConn, srcSch, table);
-        if (cols.isEmpty()) cols = getColumns(srcConn, null, table);  // 폴백
+        // 컬럼명 + 타입
+        List<String>  cols     = new ArrayList<>();
+        List<Integer> colTypes = new ArrayList<>();
+        fetchColumnMeta(srcConn, srcSch, table, cols, colTypes);
+        if (cols.isEmpty()) fetchColumnMeta(srcConn, null, table, cols, colTypes);
 
         String colList   = String.join(",", cols);
         String params    = String.join(",", Collections.nCopies(cols.size(), "?"));
         String insertSql = "INSERT INTO " + tgtQ + " (" + colList + ") VALUES (" + params + ")";
         String selectSql = "SELECT " + colList + " FROM " + srcQ;
 
-        if (truncate) {
+        tgtConn.setAutoCommit(false);
+
+        // DELETE ALL
+        if (deleteAll) {
             try (Statement st = tgtConn.createStatement()) {
-                st.execute("TRUNCATE TABLE " + tgtQ);
-                log("[TRUNCATE] " + tgtQ);
+                int deleted = st.executeUpdate("DELETE FROM " + tgtQ);
+                tgtConn.commit();
+                log("[DELETE] " + tgtQ + "  " + String.format("%,d", deleted) + "건 삭제");
             }
         }
-        if (disableFK) toggleFK(tgtQ, false);
 
-        tgtConn.setAutoCommit(false);
         long inserted = 0;
         int  batchNum = 0;
 
@@ -925,7 +938,22 @@ public class OracleDataTransfer extends JFrame {
             srcSt.setFetchSize(batchSize);
 
             while (rs.next() && !stopRequested) {
-                for (int c = 0; c < cols.size(); c++) ps.setObject(c + 1, rs.getObject(c + 1));
+                for (int c = 0; c < cols.size(); c++) {
+                    int sqlType = colTypes.get(c);
+                    if (sqlType == Types.CLOB || sqlType == Types.NCLOB) {
+                        Clob clob = rs.getClob(c + 1);
+                        if (clob == null) ps.setNull(c + 1, sqlType);
+                        else              ps.setCharacterStream(c + 1,
+                                              clob.getCharacterStream(), (int) clob.length());
+                    } else if (sqlType == Types.BLOB) {
+                        Blob blob = rs.getBlob(c + 1);
+                        if (blob == null) ps.setNull(c + 1, Types.BLOB);
+                        else              ps.setBinaryStream(c + 1,
+                                              blob.getBinaryStream(), (int) blob.length());
+                    } else {
+                        ps.setObject(c + 1, rs.getObject(c + 1));
+                    }
+                }
                 ps.addBatch();
                 inserted++;
 
@@ -938,7 +966,8 @@ public class OracleDataTransfer extends JFrame {
                         progressModel.setValueAt(String.format("%,d", ins), row, 3);
                         progressModel.setValueAt(String.valueOf(bn), row, 4);
                     });
-                    log(String.format("  [%s] 배치 #%d  (%,d / %,d)", table, batchNum, inserted, total));
+                    log(String.format("  [%s] 배치 #%d  (%,d / %,d)",
+                            table, batchNum, inserted, total));
                 }
             }
             if (inserted % batchSize != 0) { ps.executeBatch(); batchNum++; }
@@ -948,7 +977,6 @@ public class OracleDataTransfer extends JFrame {
             throw ex;
         } finally {
             tgtConn.setAutoCommit(true);
-            if (disableFK) toggleFK(tgtQ, true);
         }
 
         final long insF = inserted; final int bnF = batchNum;
@@ -959,44 +987,21 @@ public class OracleDataTransfer extends JFrame {
         log(String.format("[DONE] %s  총 %,d건 / %d 배치", table, inserted, batchNum));
     }
 
-    private List<String> getColumns(Connection conn, String schema, String table) throws Exception {
-        List<String> cols = new ArrayList<>();
+    private void fetchColumnMeta(Connection conn, String schema, String table,
+                                 List<String> colsOut, List<Integer> typesOut) throws Exception {
         String owner = (schema == null || schema.isBlank()) ? null : schema.toUpperCase();
         try (ResultSet rs = conn.getMetaData().getColumns(null, owner, table.toUpperCase(), null)) {
-            while (rs.next()) cols.add(rs.getString("COLUMN_NAME"));
-        }
-        return cols;
-    }
-
-    private void toggleFK(String qualifiedTable, boolean enable) {
-        String action = enable ? "ENABLE" : "DISABLE";
-        String schema = null, table = qualifiedTable;
-        if (qualifiedTable.contains(".")) {
-            String[] p = qualifiedTable.split("\\.", 2);
-            schema = p[0]; table = p[1];
-        }
-        String sql = schema == null
-            ? "SELECT CONSTRAINT_NAME FROM USER_CONSTRAINTS WHERE TABLE_NAME=? AND CONSTRAINT_TYPE='R'"
-            : "SELECT CONSTRAINT_NAME FROM ALL_CONSTRAINTS  WHERE OWNER=? AND TABLE_NAME=? AND CONSTRAINT_TYPE='R'";
-        try (PreparedStatement ps = tgtConn.prepareStatement(sql)) {
-            if (schema == null) ps.setString(1, table);
-            else { ps.setString(1, schema); ps.setString(2, table); }
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    try (Statement st = tgtConn.createStatement()) {
-                        st.execute("ALTER TABLE " + qualifiedTable
-                                   + " " + action + " CONSTRAINT " + rs.getString(1));
-                    }
-                }
+            while (rs.next()) {
+                colsOut.add(rs.getString("COLUMN_NAME"));
+                typesOut.add(rs.getInt("DATA_TYPE"));
             }
-        } catch (Exception ex) {
-            log("⚠ FK " + action + " 실패 (" + qualifiedTable + "): " + ex.getMessage());
         }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  공통 유틸
     // ═════════════════════════════════════════════════════════════════════════
+    /** URL: jdbc:oracle:thin:@ip:port/sid  (슬래시 구분자) */
     private Connection openConnection(String ip, String port, String sid,
                                       String user, String pass) throws Exception {
         try { Class.forName("oracle.jdbc.driver.OracleDriver"); }
@@ -1007,7 +1012,7 @@ public class OracleDataTransfer extends JFrame {
                 "java -cp .:ojdbc8.jar OracleDataTransfer  로 실행하세요.");
         }
         return DriverManager.getConnection(
-            "jdbc:oracle:thin:@" + ip + ":" + port + ":" + sid, user, pass);
+            "jdbc:oracle:thin:@" + ip + ":" + port + "/" + sid, user, pass);
     }
 
     private void updateProgress(int row, String status,
@@ -1022,7 +1027,8 @@ public class OracleDataTransfer extends JFrame {
 
     private void log(String msg) {
         SwingUtilities.invokeLater(() -> {
-            logArea.append("[" + new java.text.SimpleDateFormat("HH:mm:ss").format(new Date()) + "] " + msg + "\n");
+            logArea.append("[" + new java.text.SimpleDateFormat("HH:mm:ss").format(new Date())
+                           + "] " + msg + "\n");
             logArea.setCaretPosition(logArea.getDocument().getLength());
         });
     }
@@ -1041,7 +1047,7 @@ public class OracleDataTransfer extends JFrame {
         TitledBorder tb = BorderFactory.createTitledBorder(
             BorderFactory.createLineBorder(C_BORDER), "  " + title + "  ");
         tb.setTitleColor(C_ACCENT);
-        tb.setTitleFont(new Font("Consolas", Font.BOLD, 11));
+        tb.setTitleFont(new Font(FN, Font.BOLD, F_SM));
         return tb;
     }
 
@@ -1049,7 +1055,7 @@ public class OracleDataTransfer extends JFrame {
         JTextField f = new JTextField(placeholder);
         f.setBackground(C_INPUT_BG); f.setForeground(C_TEXT);
         f.setCaretColor(C_ACCENT);
-        f.setFont(new Font("Consolas", Font.PLAIN, 12));
+        f.setFont(new Font(FN, Font.PLAIN, F_MD));
         f.setBorder(BorderFactory.createCompoundBorder(
             BorderFactory.createLineBorder(C_FIELD_BD),
             BorderFactory.createEmptyBorder(3, 6, 3, 6)));
@@ -1061,7 +1067,7 @@ public class OracleDataTransfer extends JFrame {
         JPasswordField f = new JPasswordField();
         f.setBackground(C_INPUT_BG); f.setForeground(C_TEXT);
         f.setCaretColor(C_ACCENT);
-        f.setFont(new Font("Consolas", Font.PLAIN, 12));
+        f.setFont(new Font(FN, Font.PLAIN, F_MD));
         f.setBorder(BorderFactory.createCompoundBorder(
             BorderFactory.createLineBorder(C_FIELD_BD),
             BorderFactory.createEmptyBorder(3, 6, 3, 6)));
@@ -1072,7 +1078,7 @@ public class OracleDataTransfer extends JFrame {
     private JButton makeButton(String text, Color fg) {
         JButton b = new JButton(text);
         b.setForeground(fg); b.setBackground(C_CARD);
-        b.setFont(new Font("Consolas", Font.BOLD, 11));
+        b.setFont(new Font(FN, Font.BOLD, F_SM));
         b.setBorder(BorderFactory.createCompoundBorder(
             BorderFactory.createLineBorder(fg.darker()),
             BorderFactory.createEmptyBorder(4, 10, 4, 10)));
@@ -1088,7 +1094,7 @@ public class OracleDataTransfer extends JFrame {
     private JCheckBox makeCheck(String text) {
         JCheckBox cb = new JCheckBox(text);
         cb.setBackground(C_CARD); cb.setForeground(C_TEXT);
-        cb.setFont(new Font("Consolas", Font.PLAIN, 11));
+        cb.setFont(new Font(FN, Font.PLAIN, F_MD));
         cb.setFocusPainted(false);
         return cb;
     }
@@ -1096,7 +1102,7 @@ public class OracleDataTransfer extends JFrame {
     private JLabel label(String text) {
         JLabel l = new JLabel(text);
         l.setForeground(C_TEXT_DIM);
-        l.setFont(new Font("Consolas", Font.PLAIN, 11));
+        l.setFont(new Font(FN, Font.PLAIN, F_SM));
         return l;
     }
 
@@ -1117,7 +1123,7 @@ public class OracleDataTransfer extends JFrame {
         if (ed instanceof JSpinner.DefaultEditor de) {
             JTextField tf = de.getTextField();
             tf.setBackground(C_INPUT_BG); tf.setForeground(C_TEXT);
-            tf.setFont(new Font("Consolas", Font.PLAIN, 12));
+            tf.setFont(new Font(FN, Font.PLAIN, F_MD));
             tf.setCaretColor(C_ACCENT);
             tf.setBorder(BorderFactory.createEmptyBorder(2, 4, 2, 4));
         }
@@ -1125,19 +1131,19 @@ public class OracleDataTransfer extends JFrame {
 
     private void styleProgressBar(JProgressBar pb, Color fg) {
         pb.setBackground(C_INPUT_BG); pb.setForeground(fg);
-        pb.setFont(new Font("Consolas", Font.BOLD, 10));
+        pb.setFont(new Font(FN, Font.BOLD, F_SM));
         pb.setBorder(BorderFactory.createLineBorder(C_FIELD_BD));
     }
 
     private void styleTable(JTable t) {
         t.setBackground(C_INPUT_BG); t.setForeground(C_TEXT);
-        t.setFont(new Font("Consolas", Font.PLAIN, 11));
+        t.setFont(new Font(FN, Font.PLAIN, F_MD));
         t.setGridColor(C_BORDER); t.setRowHeight(22);
         t.setSelectionBackground(new Color(0x00, 0x50, 0x80));
         t.setSelectionForeground(Color.WHITE);
         t.getTableHeader().setBackground(C_CARD);
         t.getTableHeader().setForeground(C_ACCENT);
-        t.getTableHeader().setFont(new Font("Consolas", Font.BOLD, 11));
+        t.getTableHeader().setFont(new Font(FN, Font.BOLD, F_MD));
         t.getTableHeader().setBorder(BorderFactory.createLineBorder(C_BORDER));
         t.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
             public Component getTableCellRendererComponent(JTable tbl, Object val,
@@ -1172,18 +1178,25 @@ public class OracleDataTransfer extends JFrame {
         System.setProperty("sun.java2d.uiScale", "1.0");
         try {
             UIManager.setLookAndFeel(UIManager.getCrossPlatformLookAndFeelClassName());
-            UIManager.put("Panel.background",            new Color(0x0F, 0x17, 0x23));
-            UIManager.put("OptionPane.background",       new Color(0x16, 0x21, 0x2E));
-            UIManager.put("OptionPane.messageForeground",new Color(0xD0, 0xE8, 0xFF));
-            UIManager.put("Button.background",           new Color(0x1C, 0x2A, 0x3A));
-            UIManager.put("Button.foreground",           new Color(0xD0, 0xE8, 0xFF));
-            UIManager.put("ScrollBar.background",        new Color(0x0F, 0x17, 0x23));
-            UIManager.put("ScrollBar.thumb",             new Color(0x2A, 0x3F, 0x55));
-            UIManager.put("SplitPane.background",        new Color(0x0F, 0x17, 0x23));
-            UIManager.put("SplitPaneDivider.background", new Color(0x2A, 0x3F, 0x55));
-            UIManager.put("TabbedPane.selected",         new Color(0x1C, 0x2A, 0x3A));
-            UIManager.put("TabbedPane.background",       new Color(0x0F, 0x17, 0x23));
-            UIManager.put("TabbedPane.foreground",       new Color(0xD0, 0xE8, 0xFF));
+            Color bg    = new Color(0x0F, 0x17, 0x23);
+            Color panel = new Color(0x16, 0x21, 0x2E);
+            Color card  = new Color(0x1C, 0x2A, 0x3A);
+            Color text  = new Color(0xD0, 0xE8, 0xFF);
+            Color thumb = new Color(0x2A, 0x3F, 0x55);
+
+            UIManager.put("Panel.background",              bg);
+            UIManager.put("OptionPane.background",         panel);
+            UIManager.put("OptionPane.messageForeground",  text);
+            UIManager.put("Button.background",             card);
+            UIManager.put("Button.foreground",             text);
+            UIManager.put("ScrollBar.background",          bg);
+            UIManager.put("ScrollBar.thumb",               thumb);
+            UIManager.put("SplitPane.background",          bg);
+            UIManager.put("SplitPaneDivider.background",   thumb);
+            UIManager.put("TabbedPane.selected",           card);
+            UIManager.put("TabbedPane.background",         bg);
+            UIManager.put("TabbedPane.foreground",         text);
+            UIManager.put("TabbedPane.unselectedBackground", panel);
         } catch (Exception ignored) {}
 
         SwingUtilities.invokeLater(() -> new OracleDataTransfer().setVisible(true));
